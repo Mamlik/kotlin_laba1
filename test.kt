@@ -7,12 +7,14 @@ val SCALE: BI = BI.valueOf(100_000_000L)
 
 fun longToInternal(valueWhole: Long): BI = BI.valueOf(valueWhole) * SCALE
 
+// Класс рационального числа - дроби вида num/znam
 data class Rational(val num: BI, val znam: BI) {
     init {
         if (znam == BI.ZERO) {
             throw IllegalArgumentException("Denominator must not be zero")
         }
     }
+    // Нормализация дроби
     fun normalized(): Rational {
         val g = num.gcd(znam)
         val n = num.divide(g)
@@ -24,11 +26,14 @@ data class Rational(val num: BI, val znam: BI) {
             Rational(n, d)
         }
     }
+    // Произведение рациональных
     operator fun times(other: Rational): Rational {
         return Rational(num.multiply(other.num), znam.multiply(other.znam)).normalized()
     }
+    // Инвертирование рационального числа
     fun invert(): Rational = Rational(znam, num)
 
+    // Домножение BigInteger на Rational
     fun applyTo(amount: BI): BI {
         val res = amount.multiply(num).divide(znam)
         return res
@@ -55,6 +60,7 @@ enum class Currency(val code: String) {
 }
 
 
+// Интерфейс биржи
 interface Exchange {
     fun getRate(from: Currency, to: Currency): Rational?
     fun convert(amount: BI, from: Currency, to: Currency): Result<BI>
@@ -63,40 +69,50 @@ interface Exchange {
 }
 
 
+// Реализация интерфейса биржи
 class ConsoleExchange(initRates: Map<Pair<Currency, Currency>, Rational>) : Exchange {
+    // Map from (from, to) -> Rational хранит явно заданные валютные пары {(currency, currency), rational}
     private val rates: MutableMap<Pair<Currency, Currency>, Rational> = mutableMapOf()
-    private val adj: MutableMap<Currency, MutableMap<Currency, Rational>> = mutableMapOf()
+    // Adjacency from -> (to -> rate) графовое представление связей между парами валют(заданных явно)
+    // Currency -> MutableMap смежных с ней(и значение в ребрах)
+    private val adjacency: MutableMap<Currency, MutableMap<Currency, Rational>> = mutableMapOf()
 
+    // Установка новой пары в adjacency и rates (синхронизирующая adjacency и rates)
     private fun setRate(pair: Pair<Currency, Currency>, rate: Rational) {
         val normalized = rate.normalized()
         rates[pair] = normalized
-        adj.computeIfAbsent(pair.first) { mutableMapOf() }[pair.second] = normalized
+        adjacency.computeIfAbsent(pair.first) { mutableMapOf() }[pair.second] = normalized
     }
 
     init {
+        // Установка стандартных валютных пар
         rates.putAll(initRates.mapValues { it.value.normalized() })
         for ((pair, rate) in rates) {
             val (a, b) = pair
-            adj.computeIfAbsent(a) { mutableMapOf() }[b] = rate
+            adjacency.computeIfAbsent(a) { mutableMapOf() }[b] = rate
         }
     }
 
+    //Получение курса между валютами from и to
     override fun getRate(from: Currency, to: Currency): Rational? {
+        //corner case - валютная пара задана при инициализации или to=from(курс обмена = 1)
         if (from == to) return Rational.of(1, 1)
         rates[Pair(from, to)]?.let { return it }
 
-        //bfs
-        val q = ArrayDeque<Currency>()
+        //BFS для поиска пути между парами from и to и произведение курсов по этому пути
+        val queue = ArrayDeque<Currency>()
         val prev = mutableMapOf<Currency, Currency?>()
-        q.add(from)
+        queue.add(from)
         prev[from] = null
-        while (q.isNotEmpty()) {
-            val cur = q.removeFirst()
-            val neighbors = adj[cur] ?: continue
-            for ((nb, _) in neighbors) {
-                if (nb in prev) continue
-                prev[nb] = cur
-                if (nb == to) {
+
+        while (queue.isNotEmpty()) {
+            val current = queue.removeFirst()
+            val neighbors = adjacency[current] ?: continue
+            for ((neighbor, _) in neighbors) {
+                if (neighbor in prev) continue
+                prev[neighbor] = current
+                if (neighbor == to) {
+                    // Восстановление пути
                     val path = mutableListOf<Currency>()
                     var x: Currency? = to
                     while (x != null) {
@@ -104,21 +120,24 @@ class ConsoleExchange(initRates: Map<Pair<Currency, Currency>, Rational>) : Exch
                         x = prev[x]
                     }
                     path.reverse()
+                    // Произведение курсов по пути из from в to
                     var acc = Rational.of(1, 1)
                     for (i in 0 until path.size - 1) {
-                        val a = path[i]
-                        val b = path[i + 1]
-                        val r = adj[a]?.get(b) ?: return null
-                        acc *= r
+                        val first = path[i]
+                        val second = path[i + 1]
+                        val rate = adjacency[first]?.get(second) ?: return null
+                        acc *= rate
                     }
                     return acc.normalized()
                 }
-                q.add(nb)
+                queue.add(neighbor)
             }
         }
         return null
     }
 
+    // Конвертация amount единиц валюты из from в to
+    // Возвращает Result<BI>
     override fun convert(amount: BI, from: Currency, to: Currency): Result<BI> {
         if (amount <= BI.ZERO) return Result.failure(IllegalArgumentException("Amount must be positive"))
         val rate = getRate(from, to) ?: return Result.failure(IllegalStateException("No conversion path from $from to $to"))
@@ -126,6 +145,7 @@ class ConsoleExchange(initRates: Map<Pair<Currency, Currency>, Rational>) : Exch
         return Result.success(converted)
     }
 
+    // Случайное изменение курсов в пределах ±5%
     override fun randomizeRates() {
         val maxPct = 5 // ±5%
         val snapshot = rates.toMap()
@@ -133,6 +153,7 @@ class ConsoleExchange(initRates: Map<Pair<Currency, Currency>, Rational>) : Exch
             val delta = Random.nextInt(-maxPct, maxPct + 1)
             val multiplier = Rational.of((100 + delta).toLong(), 100) // (100+delta)/100
             val newRate = (v * multiplier).normalized()
+            //Установка нового курса по валютной паре k и обратного
             if (newRate.num != BI.ZERO && newRate.znam != BI.ZERO) {
                 setRate(k, newRate)
                 val invKey = Pair(k.second, k.first)
@@ -141,6 +162,7 @@ class ConsoleExchange(initRates: Map<Pair<Currency, Currency>, Rational>) : Exch
         }
     }
 
+    // Вывод курсов валют
     override fun showRates(): String {
         val sb = StringBuilder()
         rates.entries.sortedBy { it.key.first.code + it.key.second.code }.forEach { (k, v) ->
@@ -149,14 +171,16 @@ class ConsoleExchange(initRates: Map<Pair<Currency, Currency>, Rational>) : Exch
         return sb.toString()
     }
 
+    // представить рациональное число r как десятичное с SCALE (8 знаков)
     private fun formatRational(r: Rational): String {
         //r = (num * SCALE)/znam / SCALE
         val scaled = r.num.multiply(SCALE).divide(r.znam)
-        val whole = scaled.divide(SCALE)
-        val frac = scaled.mod(SCALE).abs()
+        val whole = scaled.divide(SCALE) // целое
+        val frac = scaled.mod(SCALE).abs() // дробное
         return "${whole}.${frac.toString().padStart(8, '0')}"
     }
 
+    // если в rates есть пара [currency1, currency2], то также посчитать курс для [currency2, currency1]
     fun ensureBothDirections() {
         val snapshot = rates.toMap()
         snapshot.forEach { (k, v) ->
@@ -167,13 +191,17 @@ class ConsoleExchange(initRates: Map<Pair<Currency, Currency>, Rational>) : Exch
     }
 }
 
+// Класс пользователя
 class User(val name: String) {
+    // MutableMap баланса пользователя в каждой из инициализированных валют
     private val balances: MutableMap<Currency, BI> = mutableMapOf()
 
+    // Функция пополнения баланса currency на сумму amount
     fun deposit(currency: Currency, amount: BI) {
         balances[currency] = balances.getOrDefault(currency, BI.ZERO).add(amount)
     }
 
+    // Функция снятия с баланса currency суммы amount
     fun withdraw(currency: Currency, amount: BI): Boolean {
         val cur = balances.getOrDefault(currency, BI.ZERO)
         return if (cur >= amount) {
@@ -182,10 +210,12 @@ class User(val name: String) {
         } else false
     }
 
+    // Вывести баланс в валюте currency
     fun getBalance(currency: Currency): BI = balances.getOrDefault(currency, BI.ZERO)
 }
 
-
+// Визуальное представление Big Integer умноженного на SCALE как числа с плавающей точкой
+// (например)BI -> 12.34
 fun formatAmount(bi: BI): String {
     val whole = bi.divide(SCALE)
     val frac = bi.mod(SCALE).abs().toString().padStart(8, '0')
@@ -252,6 +282,7 @@ fun main() {
                     continue@loop
                 }
                 print("Сумма (например 12.34): ")
+                // Считывание числа с плавающей точкой и перевод в BI
                 val amtInput = readlnOrNull()?.trim()
                 val amount = try {
                     val parts = amtInput?.split('.') ?: listOf("0")
